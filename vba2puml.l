@@ -37,6 +37,15 @@ int is_else_in_if = C_UNRELATED_ELSE;
 								return(IF);																\
 							})
 							
+
+#define process_elseif_block()	({																\
+								char buf[yyleng+1];														\
+								int buf_leng = yyleng;													\
+								remove_line_feed(yytext, yyleng, buf, &buf_leng);						\
+								printf("else if(s):        (%s) len=%d \n", buf, buf_leng);					\
+								BEGIN(INITIAL); push_synbol_string(buf, buf_leng);						\
+								return(ELSE_IF);																\
+							})
 enum {
 	C_UNRELATED_WHILE = 0,
 	C_WITH_BLOCK,
@@ -70,11 +79,11 @@ typedef enum {
 t_blocktype block_stack[MAX_OF_BLOCK_STACK] = {C_BLOCK_TYPE_NONE};
 int block_stack_index = 0;
 
-inline void push_block_stack(t_blocktype stc)	{
+void push_block_stack(t_blocktype stc)	{
 		printf("*************************** [push] blockstack[%d->%d]=%d\n", block_stack_index, block_stack_index+1, stc);
 		block_stack[++	block_stack_index] = stc;
 	}
-inline t_blocktype pop_block_stack()	{
+t_blocktype pop_block_stack()	{
 	printf("*************************** [pop] blockstack[%d->%d]=%d\n", block_stack_index, block_stack_index-1, block_stack[block_stack_index]);
 	if(block_stack_index==0){ return C_BLOCK_TYPE_WRONG; }
 	return block_stack[block_stack_index--];
@@ -110,7 +119,7 @@ EXCEPTION       On Error GoTo
 
 %%
 {white}+
-{STO_CLASS}*" Function "{letter}+\(.+\)*.*(\r|\n)	{
+{STO_CLASS}*[ ]*"Function "{letter}+\(.*\)*.*(\r|\n)	{
 													char buf[yyleng+1];
 													int buf_leng = yyleng;
 													remove_line_feed(yytext, yyleng, buf, &buf_leng);
@@ -119,7 +128,20 @@ EXCEPTION       On Error GoTo
 													push_block_stack(C_BLOCK_TYPE_FUNCTION);
 													return(FUNCTION);
 											}
+{STO_CLASS}*[ ]*"Sub "{letter}+\(.*\)*.*(\r|\n)	{
+													char buf[yyleng+1];
+													int buf_leng = yyleng;
+													remove_line_feed(yytext, yyleng, buf, &buf_leng);
+													printf("start sub:%s\n", yytext);
+													push_synbol_string(buf, buf_leng);
+													push_block_stack(C_BLOCK_TYPE_FUNCTION);
+													return(FUNCTION);
+											}
 "End Function"				{	printf("function block closed");
+								push_synbol_string("stop\n@enduml", sizeof("stop\n@enduml"));
+								return(ENDFUNCTION);
+							}
+"End Sub"				{	printf("Sub block closed");
 								push_synbol_string("stop\n@enduml", sizeof("stop\n@enduml"));
 								return(ENDFUNCTION);
 							}
@@ -130,7 +152,7 @@ EXCEPTION       On Error GoTo
 								return(ENDIF);
 							}
 
-"For ".+" To "{integer}		{	printf("for block\n"); push_block_stack(C_BLOCK_TYPE_FOR); process_for_block(C_WITH_BLOCK); }
+"For ".+" To ".+			{	printf("for block\n"); push_block_stack(C_BLOCK_TYPE_FOR); process_for_block(C_WITH_BLOCK); }
 Next					{	pop_block_stack();
 									printf("for block closed");
 									return(ENDWHILE);
@@ -142,7 +164,7 @@ Next					{	pop_block_stack();
 									return(ENDWHILE);
 						}
 
-"Do "[While|Until]" ".+		{	printf("Do while block\n"); push_block_stack(C_BLOCK_TYPE_WHILE); process_for_block(C_WITH_BLOCK); }
+"Do "(While|Until)" ".+		{	printf("Do while block\n"); push_block_stack(C_BLOCK_TYPE_WHILE); process_for_block(C_WITH_BLOCK); }
 "Loop"					{	pop_block_stack();
 									printf("do while block closed");
 									return(ENDWHILE);
@@ -175,6 +197,28 @@ Next					{	pop_block_stack();
 							push_synbol_string("else", sizeof("else"));
 							return(ELSE); }
 
+"ElseIf ".+" Then"				{	printf("Start else if block\n");
+						pop_block_stack();
+						push_block_stack(C_BLOCK_TYPE_ELSE);
+						process_elseif_block();
+						}
+
+"Select Case ".+				{	printf("Start Select Case block\n"); push_block_stack(C_BLOCK_TYPE_IF); process_if_block(C_WITH_ELSE_BLOCK); }
+"Case ".+					{	printf("Start Select Case in Case block\n");
+							pop_block_stack();
+							push_block_stack(C_BLOCK_TYPE_ELSE);
+							process_elseif_block();
+						}
+"Case Else"					{ 	printf("Start Select Case in Case Else block\n");
+							pop_block_stack();
+							push_block_stack(C_BLOCK_TYPE_ELSE);
+							push_synbol_string("else", sizeof("else"));
+							return(ELSE); }
+"End Select"					{	pop_block_stack();
+							printf("Select block closed");
+							return(ENDIF);
+							}
+
 .				{	BEGIN(ST_ANY_OTHER); yymore();	}
 <ST_ANY_OTHER>(\r|\n)	{	char buf[yyleng+1];
 							int buf_leng = yyleng;
@@ -190,23 +234,44 @@ Next					{	pop_block_stack();
 <<EOF>>			{ printf("end of file\n"); return(END_OF_FILE); }
 
 %%
+
+#define C_OUTPUT_FILE_MAX    (256)
 int main(int argc, char *argv[])
 {
     FILE * fptr_r = NULL;
     FILE * fptr_w = NULL;
-    /* Read file pointer */
-    if(argc!=2){
-        printf("usage: c2puml [C source file name] \n");
-        exit(1);
-    }
+    int i;
+    char opt;
+    char output_filne_name[C_OUTPUT_FILE_MAX] = {0};
+    char input_filne_name[C_OUTPUT_FILE_MAX] = {0};
 
-    if ((fptr_r = fopen(argv[1], "r"))==NULL) {
+    /* default name. */
+    strncpy(output_filne_name, "out.puml", C_OUTPUT_FILE_MAX);
+
+    for(i = 0; i < argc; ++i){
+        if(*argv[i] == '-'){
+            opt = *(argv[i]+1);
+            switch(opt){
+                case 'o':
+                    strncpy(output_filne_name, argv[i+1], C_OUTPUT_FILE_MAX);
+                    break;
+                default:
+                    printf("Undefined Option.\n");
+                    break;
+            }
+            i++;
+        } else {
+            sprintf(input_filne_name, "./%s", argv[i]);
+        }
+    }
+    /* Read file pointer */
+    if ((fptr_r = fopen(input_filne_name, "r"))==NULL) {
         printf("file open failed.\n");
         exit(1);
     }
     
     /* write file pointer */
-    if ((fptr_w = fopen("./out.puml", "w"))==NULL) {
+    if ((fptr_w = fopen(output_filne_name, "w"))==NULL) {
         printf("output file open failed.\n");
         exit(1);
     }
